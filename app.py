@@ -246,7 +246,7 @@ def fit_week_fe_continuous_model(df, predictor, outcome="Weekly_Engagement_Mean"
         "Original variable": predictor,
         "N": int(len(model_df)),
         "Weeks": int(model_df["Week_Number"].nunique()),
-        "Beta 1": fitted.params.get(predictor, math.nan),
+        "β1 (Need support coefficient)": fitted.params.get(predictor, math.nan),
         "SE": fitted.bse.get(predictor, math.nan),
         "t": fitted.tvalues.get(predictor, math.nan),
         "p (raw)": p_value,
@@ -991,9 +991,16 @@ if saved_files:
             if association_df.empty:
                 st.info("Not enough variation or complete responses to estimate the week fixed-effects model.")
             else:
+                result_row = association_df.iloc[0]
+                result_cols = st.columns(5)
+                result_cols[0].metric("β₁", f"{result_row['β1 (Need support coefficient)']:.3f}")
+                result_cols[1].metric("SE", f"{result_row['SE']:.3f}")
+                result_cols[2].metric("t", f"{result_row['t']:.2f}")
+                result_cols[3].metric("p", f"{result_row['p (raw)']:.4f}")
+                result_cols[4].metric("Sig.", result_row["Sig."] if result_row["Sig."] else "n.s.")
                 st.dataframe(
                     association_df.style.format({
-                        "Beta 1": "{:.3f}",
+                        "β1 (Need support coefficient)": "{:.3f}",
                         "SE": "{:.3f}",
                         "t": "{:.2f}",
                         "p (raw)": "{:.4f}",
