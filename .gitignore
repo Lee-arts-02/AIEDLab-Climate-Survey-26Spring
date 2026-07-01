@@ -1,5 +1,7 @@
 # Local data uploads and survey exports
 saved_data/
+Clean_Data/
+temp/
 
 # Python
 __pycache__/

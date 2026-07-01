@@ -706,8 +706,8 @@ def collect_interview_inventory(df, columns):
 
 # Sidebar: upload new weekly CSVs
 st.sidebar.header("📁 Data Center")
-uploaded_files = []
-st.sidebar.caption("Data source: Clean_Data folder only.")
+uploaded_files = st.sidebar.file_uploader("Upload weekly CSV files", type=["csv"], accept_multiple_files=True)
+st.sidebar.caption("Use uploaded files on Streamlit Cloud; local Clean_Data is used when no files are uploaded.")
 
 # Sniff encoding and re-save as UTF-8 when the user uploads files
 if uploaded_files:
@@ -746,9 +746,14 @@ likert_mapping = {
     "Disagree": 2, "Strongly disagree": 1, "Strongly Disagree": 1
 }
 
-# --- Auto-load weekly CSVs from Clean_Data only ---
+# --- Prefer uploaded files, then local Clean_Data, then saved_data fallback ---
 DATA_DIR = "Clean_Data"
-saved_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
+if uploaded_files:
+    saved_files = [os.path.join(SAVE_DIR, file.name) for file in uploaded_files]
+elif glob.glob(os.path.join(DATA_DIR, "*.csv")):
+    saved_files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
+else:
+    saved_files = glob.glob(os.path.join(SAVE_DIR, "*.csv"))
 
 # Render the dashboard whenever at least one saved file exists
 if saved_files:
@@ -1396,4 +1401,4 @@ if saved_files:
                     for comment in responses:
                         st.write(f"- {comment}")
 else:
-    st.info("No CSV files were found in the Clean_Data folder.")
+    st.info("Upload weekly CSV files from the sidebar, or add CSV files to the local Clean_Data folder.")
