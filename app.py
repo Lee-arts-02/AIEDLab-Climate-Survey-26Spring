@@ -100,10 +100,10 @@ def extract_week_number(week_label):
 def read_weekly_csv(file_path):
     for encoding in ["utf-8-sig", "utf-8", "gbk", "latin1"]:
         try:
-            return pd.read_csv(file_path, skiprows=[1], encoding=encoding)
+            return pd.read_csv(file_path, encoding=encoding)
         except UnicodeDecodeError:
             continue
-    return pd.read_csv(file_path, skiprows=[1], encoding="utf-8", encoding_errors="ignore")
+    return pd.read_csv(file_path, encoding="utf-8", encoding_errors="ignore")
 
 
 def split_multi_select(value):
@@ -118,7 +118,33 @@ def count_multi_select(value):
 
 def is_real_response_id(value):
     text = str(value).strip()
-    return bool(text) and "ImportId" not in text and text.lower() != "nan"
+    if not text or text.lower() == "nan":
+        return False
+    if "ImportId" in text:
+        return False
+    if text == "Enter you study ID (pseudonym)":
+        return False
+    return True
+
+
+def deduplicate_weekly_responses(df):
+    if df.empty:
+        return df
+    deduped_df = df.copy()
+    if "Is_Valid_Response" in deduped_df.columns:
+        deduped_df["_valid_response_rank"] = deduped_df["Is_Valid_Response"].fillna(False).astype(int)
+    else:
+        deduped_df["_valid_response_rank"] = deduped_df["Overall_Engagement"].notna().astype(int)
+    deduped_df["_recorded_datetime"] = pd.to_datetime(
+        deduped_df.get("RecordedDate"),
+        errors="coerce",
+    )
+    deduped_df = deduped_df.sort_values(
+        ["Week_Number", "ID", "_valid_response_rank", "_recorded_datetime"],
+        ascending=[True, True, False, False],
+    )
+    deduped_df = deduped_df.drop_duplicates(subset=["Week_Number", "ID"], keep="first")
+    return deduped_df.drop(columns=["_valid_response_rank", "_recorded_datetime"])
 
 
 def is_real_text(value):
@@ -798,6 +824,9 @@ if saved_files:
     full_df['Agentic'] = full_df[[c for c in full_df.columns if 'Engagement_4' in c][0]]
     full_df['Overall_Engagement'] = full_df[['Behavioral', 'Cognitive', 'Emotional', 'Agentic']].mean(axis=1)
     full_df['Weekly_Engagement_Mean'] = full_df['Overall_Engagement']
+    full_df['Is_Valid_Response'] = full_df[['Behavioral', 'Cognitive', 'Emotional', 'Agentic']].notna().all(axis=1)
+    full_df = deduplicate_weekly_responses(full_df)
+    full_df = full_df[full_df['Is_Valid_Response']].copy()
 
     info_col_list = [c for c in full_df.columns if 'External_events_info' in c and 'TEXT' not in c]
     follow_col_list = [c for c in full_df.columns if 'Info_Followup' in c and 'TEXT' not in c]
