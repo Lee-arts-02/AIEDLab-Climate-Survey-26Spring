@@ -225,6 +225,36 @@ def build_association_table(df, predictors, outcome="Overall_Engagement", predic
     return pd.DataFrame(rows).sort_values(["FDR p", "Predictor"], ascending=[True, True])
 
 
+def fit_week_fe_continuous_model(df, predictor, outcome="Weekly_Engagement_Mean"):
+    if predictor not in df.columns or outcome not in df.columns:
+        return pd.DataFrame()
+
+    model_df = df[[outcome, predictor, "Week_Number"]].dropna().copy()
+    if len(model_df) < 8 or model_df[predictor].nunique() < 2:
+        return pd.DataFrame()
+
+    week_dummies = pd.get_dummies(model_df["Week_Number"].astype(str), prefix="Week", drop_first=True, dtype=float)
+    x_df = pd.concat([model_df[[predictor]].astype(float), week_dummies], axis=1)
+    x_df = sm.add_constant(x_df, has_constant="add")
+    fitted = sm.OLS(model_df[outcome].astype(float), x_df).fit()
+
+    p_value = fitted.pvalues.get(predictor, math.nan)
+    return pd.DataFrame([{
+        "Model": "OLS with week fixed effects",
+        "Outcome": outcome,
+        "Predictor": "Perceived Psychological Need Support",
+        "Original variable": predictor,
+        "N": int(len(model_df)),
+        "Weeks": int(model_df["Week_Number"].nunique()),
+        "Beta 1": fitted.params.get(predictor, math.nan),
+        "SE": fitted.bse.get(predictor, math.nan),
+        "t": fitted.tvalues.get(predictor, math.nan),
+        "p (raw)": p_value,
+        "Sig.": significance_stars(p_value),
+        "R-squared": fitted.rsquared,
+    }])
+
+
 def make_option_engagement_table(df, option_col, label):
     if option_col not in df.columns:
         return pd.DataFrame()
@@ -948,20 +978,30 @@ if saved_files:
             )
 
             st.markdown("**Analysis 2. Need satisfaction-engagement association**")
-            association_df = build_association_table(
+            st.latex(r"WeeklyEngagementMean_{it} = \beta_0 + \beta_1 NeedSupport_{it} + \gamma_t + \epsilon_{it}")
+            st.caption(
+                "This model estimates whether person-week perceived psychological need support is associated with weekly engagement after controlling for week fixed effects. "
+                "NeedSupport is the Need Satisfaction Mean, computed from Autonomy, Competence, and Relatedness."
+            )
+            association_df = fit_week_fe_continuous_model(
                 quant_df,
-                ["Need_Satisfaction_Mean", "Autonomy", "Competence", "Relatedness"],
+                "Need_Satisfaction_Mean",
                 outcome="Weekly_Engagement_Mean",
             )
-            st.dataframe(
-                association_df.style.format({
-                    "Pearson r": "{:.2f}",
-                    "p (raw)": "{:.4f}",
-                    "FDR p": "{:.4f}",
-                }),
-                use_container_width=True,
-                hide_index=True,
-            )
+            if association_df.empty:
+                st.info("Not enough variation or complete responses to estimate the week fixed-effects model.")
+            else:
+                st.dataframe(
+                    association_df.style.format({
+                        "Beta 1": "{:.3f}",
+                        "SE": "{:.3f}",
+                        "t": "{:.2f}",
+                        "p (raw)": "{:.4f}",
+                        "R-squared": "{:.3f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
             association_scatter = px.scatter(
                 quant_df,
                 x="Need_Satisfaction_Mean",
