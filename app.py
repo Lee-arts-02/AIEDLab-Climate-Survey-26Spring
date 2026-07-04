@@ -302,6 +302,261 @@ def build_need_engagement_matrix(df, need_dimensions, engagement_dimensions):
     return matrix_df
 
 
+def fit_within_person_need_model(df):
+    required = ["ID", "Week_Number", "Need_Satisfaction_Mean", "Weekly_Engagement_Mean"]
+    if any(col not in df.columns for col in required):
+        return pd.DataFrame()
+
+    model_df = df[required].dropna().copy()
+    model_df["Need support above student mean"] = (
+        model_df["Need_Satisfaction_Mean"]
+        - model_df.groupby("ID")["Need_Satisfaction_Mean"].transform("mean")
+    )
+    model_df = model_df[model_df["Need support above student mean"].abs() > 1e-12]
+    if len(model_df) < 8 or model_df["ID"].nunique() < 2:
+        return pd.DataFrame()
+
+    week_dummies = pd.get_dummies(model_df["Week_Number"].astype(str), prefix="Week", drop_first=True, dtype=float)
+    student_dummies = pd.get_dummies(model_df["ID"].astype(str), prefix="Student", drop_first=True, dtype=float)
+    x_df = pd.concat([model_df[["Need support above student mean"]].astype(float), week_dummies, student_dummies], axis=1)
+    x_df = sm.add_constant(x_df, has_constant="add")
+    try:
+        fitted = sm.OLS(model_df["Weekly_Engagement_Mean"].astype(float), x_df).fit(
+            cov_type="cluster",
+            cov_kwds={"groups": model_df["ID"]},
+        )
+    except Exception:
+        fitted = sm.OLS(model_df["Weekly_Engagement_Mean"].astype(float), x_df).fit()
+
+    predictor = "Need support above student mean"
+    p_value = fitted.pvalues.get(predictor, math.nan)
+    return pd.DataFrame([{
+        "Model": "Student fixed effects + week fixed effects",
+        "Question": "When the same student feels more supported than usual, does engagement rise that week?",
+        "N": int(len(model_df)),
+        "Students": int(model_df["ID"].nunique()),
+        "β1": fitted.params.get(predictor, math.nan),
+        "Cluster SE": fitted.bse.get(predictor, math.nan),
+        "t": fitted.tvalues.get(predictor, math.nan),
+        "p (raw)": p_value,
+        "Sig.": significance_stars(p_value),
+        "R-squared": fitted.rsquared,
+    }])
+
+
+def fit_lagged_need_model(df):
+    required = ["ID", "Week_Number", "Need_Satisfaction_Mean", "Weekly_Engagement_Mean"]
+    if any(col not in df.columns for col in required):
+        return pd.DataFrame()
+
+    ordered_df = df[required].dropna().sort_values(["ID", "Week_Number"]).copy()
+    ordered_df["Next week"] = ordered_df.groupby("ID")["Week_Number"].shift(-1)
+    ordered_df["Next weekly engagement"] = ordered_df.groupby("ID")["Weekly_Engagement_Mean"].shift(-1)
+    model_df = ordered_df[ordered_df["Next week"] == ordered_df["Week_Number"] + 1].dropna().copy()
+    if len(model_df) < 8 or model_df["Need_Satisfaction_Mean"].nunique() < 2 or model_df["ID"].nunique() < 2:
+        return pd.DataFrame()
+
+    week_dummies = pd.get_dummies(model_df["Week_Number"].astype(str), prefix="Week", drop_first=True, dtype=float)
+    x_df = pd.concat([model_df[["Need_Satisfaction_Mean"]].astype(float), week_dummies], axis=1)
+    x_df = sm.add_constant(x_df, has_constant="add")
+    try:
+        fitted = sm.OLS(model_df["Next weekly engagement"].astype(float), x_df).fit(
+            cov_type="cluster",
+            cov_kwds={"groups": model_df["ID"]},
+        )
+    except Exception:
+        fitted = sm.OLS(model_df["Next weekly engagement"].astype(float), x_df).fit()
+
+    predictor = "Need_Satisfaction_Mean"
+    p_value = fitted.pvalues.get(predictor, math.nan)
+    return pd.DataFrame([{
+        "Model": "Lagged OLS with current-week fixed effects",
+        "Question": "Does Week t need support predict Week t+1 engagement?",
+        "N consecutive pairs": int(len(model_df)),
+        "Students": int(model_df["ID"].nunique()),
+        "β1": fitted.params.get(predictor, math.nan),
+        "Cluster SE": fitted.bse.get(predictor, math.nan),
+        "t": fitted.tvalues.get(predictor, math.nan),
+        "p (raw)": p_value,
+        "Sig.": significance_stars(p_value),
+        "R-squared": fitted.rsquared,
+    }])
+
+
+def build_participation_narrowing_analysis(df):
+    required = ["ID", "Week_Number", "Need_Satisfaction_Mean", "Weekly_Engagement_Mean"]
+    if any(col not in df.columns for col in required):
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    ordered_df = df[required].dropna().sort_values(["ID", "Week_Number"]).copy()
+    student_rows = []
+    for student_id, student_df in ordered_df.groupby("ID"):
+        first_row = student_df.iloc[0]
+        student_rows.append({
+            "ID": student_id,
+            "First observed week": first_row["Week_Number"],
+            "Last observed week": student_df["Week_Number"].max(),
+            "Response count": len(student_df),
+            "Late responder": int((student_df["Week_Number"] >= 9).any()),
+            "Baseline need support": first_row["Need_Satisfaction_Mean"],
+            "Baseline engagement": first_row["Weekly_Engagement_Mean"],
+            "Mean need support": student_df["Need_Satisfaction_Mean"].mean(),
+            "Mean engagement": student_df["Weekly_Engagement_Mean"].mean(),
+        })
+    student_df = pd.DataFrame(student_rows)
+    if student_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    group_df = (
+        student_df.groupby("Late responder")
+        .agg(
+            Students=("ID", "count"),
+            Mean_response_count=("Response count", "mean"),
+            Mean_last_week=("Last observed week", "mean"),
+            Baseline_need_support=("Baseline need support", "mean"),
+            Baseline_engagement=("Baseline engagement", "mean"),
+            Mean_need_support=("Mean need support", "mean"),
+            Mean_engagement=("Mean engagement", "mean"),
+        )
+        .reset_index()
+    )
+    group_df["Late responder"] = group_df["Late responder"].map({0: "No response in Weeks 9-12", 1: "Responded in Weeks 9-12"})
+
+    model_rows = []
+    for predictor in ["Baseline need support", "Baseline engagement"]:
+        model_df = student_df[["Late responder", predictor]].dropna().copy()
+        if len(model_df) < 8 or model_df["Late responder"].nunique() < 2 or model_df[predictor].nunique() < 2:
+            continue
+        x_df = sm.add_constant(model_df[[predictor]].astype(float), has_constant="add")
+        try:
+            fitted = sm.Logit(model_df["Late responder"].astype(float), x_df).fit(disp=False)
+            model_name = "Logistic regression"
+            coef_name = "Log-odds β1"
+        except Exception:
+            fitted = sm.OLS(model_df["Late responder"].astype(float), x_df).fit()
+            model_name = "Linear probability model"
+            coef_name = "Probability β1"
+        p_value = fitted.pvalues.get(predictor, math.nan)
+        model_rows.append({
+            "Model": model_name,
+            "Outcome": "Responded in Weeks 9-12",
+            "Predictor": predictor,
+            "N students": int(len(model_df)),
+            coef_name: fitted.params.get(predictor, math.nan),
+            "SE": fitted.bse.get(predictor, math.nan),
+            "p (raw)": p_value,
+            "Sig.": significance_stars(p_value),
+        })
+
+    return student_df, group_df, pd.DataFrame(model_rows)
+
+
+def build_structure_need_support_table(df, option_groups):
+    rows = []
+    for structure_type, option_col in option_groups:
+        if option_col not in df.columns:
+            continue
+        options = sorted({
+            item
+            for value in df[option_col].dropna()
+            for item in split_multi_select(value)
+            if item and "None" not in item
+        })
+        for option in options:
+            selected = df[option_col].apply(lambda value: option in split_multi_select(value)).astype(int)
+            coef, se, p_value, n_value, clusters = fit_week_fe_cluster_model(
+                df,
+                selected,
+                outcome="Need_Satisfaction_Mean",
+            )
+            rows.append({
+                "Structure type": structure_type,
+                "Original field": option_col,
+                "Original selected option": option,
+                "N": n_value,
+                "Student clusters": clusters,
+                "Selected N": int(selected.sum()),
+                "β1 predicting need support": coef,
+                "Cluster SE": se,
+                "p (raw)": p_value,
+            })
+    if not rows:
+        return pd.DataFrame()
+    p_adjusted = benjamini_hochberg([row["p (raw)"] for row in rows])
+    for row, adj in zip(rows, p_adjusted):
+        row["FDR p"] = adj
+        row["Sig."] = significance_stars(adj)
+    return pd.DataFrame(rows).sort_values(["FDR p", "Structure type", "Original field"], ascending=[True, True, True])
+
+
+def build_joint_display_table(primary_need_df, structure_engagement_df, structure_need_df):
+    quote_df = get_rq2_qualitative_findings_quotes()
+    rows = []
+
+    if not primary_need_df.empty:
+        primary = primary_need_df.iloc[0]
+        rows.append({
+            "Quantitative finding": "Perceived psychological need support predicts weekly engagement.",
+            "Model result": f"β1={primary['β1 (Need support coefficient)']:.3f}, p={primary['p (raw)']:.4f} {primary['Sig.']}",
+            "Qualitative moment": "Unclear expectations and research ambiguity",
+            "Quote": quote_df.loc[
+                quote_df["Moment"] == "Unclear expectations and research ambiguity",
+                "Quote",
+            ].iloc[0],
+            "Participant": quote_df.loc[
+                quote_df["Moment"] == "Unclear expectations and research ambiguity",
+                "Participant",
+            ].iloc[0],
+        })
+
+    if not structure_engagement_df.empty:
+        significant_engagement = structure_engagement_df[structure_engagement_df["FDR p"] < 0.05].copy()
+        for _, row in significant_engagement.head(4).iterrows():
+            option_text = str(row["Original selected option"]).lower()
+            if "interaction" in option_text and "not participate" in option_text:
+                moment = "Time conflict"
+            elif "pressure" in option_text or "mentor" in str(row["Original field"]).lower():
+                moment = "Autonomy without structure can become confusion"
+            elif "recognized" in option_text or "contribution" in option_text:
+                moment = "Showing work"
+            else:
+                moment = "Contribution to something bigger than oneself"
+            match_df = quote_df[quote_df["Moment"] == moment]
+            if match_df.empty:
+                continue
+            quote_row = match_df.iloc[0]
+            rows.append({
+                "Quantitative finding": row["Original selected option"],
+                "Model result": f"Engagement model: β1={row['Beta 1 (Structure coefficient)']:.3f}, FDR p={row['FDR p']:.4f} {row['Sig.']}",
+                "Qualitative moment": moment,
+                "Quote": quote_row["Quote"],
+                "Participant": quote_row["Participant"],
+            })
+
+    if not structure_need_df.empty:
+        significant_need = structure_need_df[structure_need_df["FDR p"] < 0.05].copy()
+        for _, row in significant_need.head(3).iterrows():
+            option_text = str(row["Original selected option"]).lower()
+            moment = "Autonomy without structure can become confusion"
+            if "recognized" in option_text or "contribution" in option_text:
+                moment = "Agentic contribution"
+            elif "question" in option_text or "uncertainty" in option_text:
+                moment = "Unclear expectations and research ambiguity"
+            match_df = quote_df[quote_df["Moment"] == moment]
+            if match_df.empty:
+                continue
+            quote_row = match_df.iloc[0]
+            rows.append({
+                "Quantitative finding": row["Original selected option"],
+                "Model result": f"Need-support model: β1={row['β1 predicting need support']:.3f}, FDR p={row['FDR p']:.4f} {row['Sig.']}",
+                "Qualitative moment": moment,
+                "Quote": quote_row["Quote"],
+                "Participant": quote_row["Participant"],
+            })
+
+    return pd.DataFrame(rows)
+
+
 def make_option_engagement_table(df, option_col, label):
     if option_col not in df.columns:
         return pd.DataFrame()
@@ -936,6 +1191,7 @@ if saved_files:
                 "RQ1: Need satisfaction and engagement over time",
                 "RQ2: Lab design structures and research engagement",
                 "RQ3: Research engagement and researcher identity",
+                "Exploratory analyses: mechanisms and triangulation",
             ],
         )
 
@@ -1226,6 +1482,134 @@ if saved_files:
                     if selected_theme != "All":
                         display_excerpt_df = excerpt_df[excerpt_df["Matched theme(s)"].str.contains(re.escape(selected_theme), regex=True)]
                     st.dataframe(display_excerpt_df.head(50), use_container_width=True, hide_index=True)
+
+        elif rq_choice.startswith("Exploratory"):
+            st.subheader("Exploratory analyses: mechanisms and triangulation")
+            st.caption(
+                "These analyses use the same cleaned person-week dataset as the RQ dashboard. They are exploratory and should be interpreted as associational rather than causal."
+            )
+
+            st.markdown("**1. Within-person model**")
+            st.latex(r"Engagement_{it} = \beta_0 + \beta_1(NeedSupport_{it} - \overline{NeedSupport_i}) + \alpha_i + \gamma_t + \epsilon_{it}")
+            st.caption(
+                "This model asks whether engagement rises in weeks when the same student reports higher need support than their own semester average. "
+                "It includes student fixed effects and week fixed effects, with standard errors clustered by student ID."
+            )
+            within_df = fit_within_person_need_model(quant_df)
+            if within_df.empty:
+                st.info("Not enough within-student variation to estimate the within-person model.")
+            else:
+                st.dataframe(
+                    within_df.style.format({
+                        "β1": "{:.3f}",
+                        "Cluster SE": "{:.3f}",
+                        "t": "{:.2f}",
+                        "p (raw)": "{:.4f}",
+                        "R-squared": "{:.3f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("**2. Lagged model**")
+            st.latex(r"Engagement_{i,t+1} = \beta_0 + \beta_1 NeedSupport_{it} + \gamma_t + \epsilon_{it}")
+            st.caption(
+                "This model uses only consecutive student-week pairs and asks whether need support in Week t predicts engagement in Week t+1. "
+                "It includes fixed effects for the current week and clusters standard errors by student ID."
+            )
+            lagged_df = fit_lagged_need_model(quant_df)
+            if lagged_df.empty:
+                st.info("Not enough consecutive weekly observations to estimate the lagged model.")
+            else:
+                st.dataframe(
+                    lagged_df.style.format({
+                        "β1": "{:.3f}",
+                        "Cluster SE": "{:.3f}",
+                        "t": "{:.2f}",
+                        "p (raw)": "{:.4f}",
+                        "R-squared": "{:.3f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("**3. Participation narrowing analysis**")
+            st.caption(
+                "This analysis checks whether later-week respondents differ from students who stopped responding earlier. "
+                "Late responder means the student submitted at least one response in Weeks 9-12."
+            )
+            student_participation_df, participation_group_df, participation_model_df = build_participation_narrowing_analysis(quant_df)
+            if student_participation_df.empty:
+                st.info("Not enough student-level participation records to estimate narrowing patterns.")
+            else:
+                st.markdown("Student-level participation summary")
+                st.dataframe(
+                    participation_group_df.style.format({
+                        "Mean_response_count": "{:.2f}",
+                        "Mean_last_week": "{:.2f}",
+                        "Baseline_need_support": "{:.2f}",
+                        "Baseline_engagement": "{:.2f}",
+                        "Mean_need_support": "{:.2f}",
+                        "Mean_engagement": "{:.2f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if not participation_model_df.empty:
+                    st.markdown("Modeling later participation")
+                    st.dataframe(
+                        participation_model_df.style.format({
+                            "Log-odds β1": "{:.3f}",
+                            "Probability β1": "{:.3f}",
+                            "SE": "{:.3f}",
+                            "p (raw)": "{:.4f}",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                with st.expander("View student-level participation records"):
+                    st.dataframe(student_participation_df, use_container_width=True, hide_index=True)
+
+            st.markdown("**4. Structure × need support model**")
+            st.latex(r"NeedSupport_{it} = \beta_0 + \beta_1 Structure_{it} + \gamma_t + \epsilon_{it}")
+            st.caption(
+                "Each row fits one structure at a time. The outcome is Need Satisfaction Mean rather than engagement. "
+                "Models include week fixed effects and cluster-robust standard errors by student ID."
+            )
+            actual_participation_groups = (
+                [("External events", col) for col in info_col_list + interaction_col_list]
+                + [("Relations", col) for col in rel_cols_all]
+            )
+            structure_need_df = build_structure_need_support_table(quant_df, actual_participation_groups)
+            if structure_need_df.empty:
+                st.info("No design-structure options were available for the need-support model.")
+            else:
+                st.dataframe(
+                    structure_need_df.style.format({
+                        "β1 predicting need support": "{:.3f}",
+                        "Cluster SE": "{:.3f}",
+                        "p (raw)": "{:.4f}",
+                        "FDR p": "{:.4f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("**5. Joint display table**")
+            st.caption(
+                "This table places significant quantitative patterns beside interview quotes. It is intended as a mixed-methods display, not an automated interpretation."
+            )
+            primary_need_df = fit_week_fe_continuous_model(
+                quant_df,
+                "Need_Satisfaction_Mean",
+                outcome="Weekly_Engagement_Mean",
+            )
+            structure_engagement_df = build_structure_regression_table(quant_df, actual_participation_groups)
+            joint_display_df = build_joint_display_table(primary_need_df, structure_engagement_df, structure_need_df)
+            if joint_display_df.empty:
+                st.info("No significant quantitative findings were available for the joint display.")
+            else:
+                st.dataframe(joint_display_df, use_container_width=True, hide_index=True)
 
     elif view_mode == "Overall trend":
         st.header("📈 The evolution of psychological needs and engagement over the semester")
