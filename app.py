@@ -383,6 +383,32 @@ def fit_lagged_need_model(df):
     }])
 
 
+def build_within_person_plot_data(df):
+    required = ["ID", "Week_Number", "Week", "Need_Satisfaction_Mean", "Weekly_Engagement_Mean"]
+    if any(col not in df.columns for col in required):
+        return pd.DataFrame()
+    plot_df = df[required].dropna().copy()
+    plot_df["Need support above student mean"] = (
+        plot_df["Need_Satisfaction_Mean"]
+        - plot_df.groupby("ID")["Need_Satisfaction_Mean"].transform("mean")
+    )
+    plot_df["Engagement above student mean"] = (
+        plot_df["Weekly_Engagement_Mean"]
+        - plot_df.groupby("ID")["Weekly_Engagement_Mean"].transform("mean")
+    )
+    return plot_df
+
+
+def build_lagged_plot_data(df):
+    required = ["ID", "Week_Number", "Week", "Need_Satisfaction_Mean", "Weekly_Engagement_Mean"]
+    if any(col not in df.columns for col in required):
+        return pd.DataFrame()
+    ordered_df = df[required].dropna().sort_values(["ID", "Week_Number"]).copy()
+    ordered_df["Next week"] = ordered_df.groupby("ID")["Week_Number"].shift(-1)
+    ordered_df["Next weekly engagement"] = ordered_df.groupby("ID")["Weekly_Engagement_Mean"].shift(-1)
+    return ordered_df[ordered_df["Next week"] == ordered_df["Week_Number"] + 1].dropna().copy()
+
+
 def build_participation_narrowing_analysis(df):
     required = ["ID", "Week_Number", "Need_Satisfaction_Mean", "Weekly_Engagement_Mean"]
     if any(col not in df.columns for col in required):
@@ -1499,6 +1525,24 @@ if saved_files:
             if within_df.empty:
                 st.info("Not enough within-student variation to estimate the within-person model.")
             else:
+                within_plot_df = build_within_person_plot_data(quant_df)
+                if not within_plot_df.empty:
+                    within_fig = px.scatter(
+                        within_plot_df,
+                        x="Need support above student mean",
+                        y="Engagement above student mean",
+                        color="Week",
+                        hover_data=["ID", "Week"],
+                        trendline="ols",
+                        title="Within-person deviations: need support and engagement",
+                        labels={
+                            "Need support above student mean": "Need support above student's own mean",
+                            "Engagement above student mean": "Engagement above student's own mean",
+                        },
+                    )
+                    within_fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                    within_fig.add_vline(x=0, line_dash="dash", line_color="gray")
+                    st.plotly_chart(within_fig, use_container_width=True)
                 st.dataframe(
                     within_df.style.format({
                         "β1": "{:.3f}",
@@ -1521,6 +1565,23 @@ if saved_files:
             if lagged_df.empty:
                 st.info("Not enough consecutive weekly observations to estimate the lagged model.")
             else:
+                lagged_plot_df = build_lagged_plot_data(quant_df)
+                if not lagged_plot_df.empty:
+                    lagged_fig = px.scatter(
+                        lagged_plot_df,
+                        x="Need_Satisfaction_Mean",
+                        y="Next weekly engagement",
+                        color="Week",
+                        hover_data=["ID", "Week", "Next week"],
+                        trendline="ols",
+                        title="Lagged association: Week t need support and Week t+1 engagement",
+                        labels={
+                            "Need_Satisfaction_Mean": "Week t Need Satisfaction Mean",
+                            "Next weekly engagement": "Week t+1 Weekly Engagement Mean",
+                        },
+                    )
+                    lagged_fig.update_layout(yaxis=dict(range=[1, 4]), xaxis=dict(range=[1, 4]))
+                    st.plotly_chart(lagged_fig, use_container_width=True)
                 st.dataframe(
                     lagged_df.style.format({
                         "β1": "{:.3f}",
@@ -1543,6 +1604,35 @@ if saved_files:
                 st.info("Not enough student-level participation records to estimate narrowing patterns.")
             else:
                 st.markdown("Student-level participation summary")
+                participation_plot_df = participation_group_df.melt(
+                    id_vars=["Late responder"],
+                    value_vars=[
+                        "Baseline_need_support",
+                        "Baseline_engagement",
+                        "Mean_need_support",
+                        "Mean_engagement",
+                    ],
+                    var_name="Measure",
+                    value_name="Mean score",
+                )
+                participation_plot_df["Measure"] = participation_plot_df["Measure"].map({
+                    "Baseline_need_support": "Baseline need support",
+                    "Baseline_engagement": "Baseline engagement",
+                    "Mean_need_support": "Semester mean need support",
+                    "Mean_engagement": "Semester mean engagement",
+                })
+                participation_fig = px.bar(
+                    participation_plot_df,
+                    x="Measure",
+                    y="Mean score",
+                    color="Late responder",
+                    barmode="group",
+                    title="Participation narrowing: early drop-off vs late responders",
+                    text="Mean score",
+                )
+                participation_fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+                participation_fig.update_layout(yaxis=dict(range=[1, 4], title="Mean score"))
+                st.plotly_chart(participation_fig, use_container_width=True)
                 st.dataframe(
                     participation_group_df.style.format({
                         "Mean_response_count": "{:.2f}",
@@ -1584,6 +1674,46 @@ if saved_files:
             if structure_need_df.empty:
                 st.info("No design-structure options were available for the need-support model.")
             else:
+                forest_df = structure_need_df.dropna(subset=["β1 predicting need support", "Cluster SE"]).copy()
+                forest_df = forest_df[(forest_df["FDR p"] < 0.10) | (forest_df["Selected N"] >= 20)]
+                forest_df = forest_df.sort_values("FDR p").head(14).copy()
+                if not forest_df.empty:
+                    forest_df["Structure label"] = forest_df["Original selected option"].str.wrap(58)
+                    forest_df["CI low"] = forest_df["β1 predicting need support"] - 1.96 * forest_df["Cluster SE"]
+                    forest_df["CI high"] = forest_df["β1 predicting need support"] + 1.96 * forest_df["Cluster SE"]
+                    forest_df = forest_df.sort_values("β1 predicting need support")
+                    forest_fig = go.Figure()
+                    forest_fig.add_trace(go.Scatter(
+                        x=forest_df["β1 predicting need support"],
+                        y=forest_df["Structure label"],
+                        mode="markers",
+                        marker=dict(
+                            size=10,
+                            color=forest_df["FDR p"],
+                            colorscale="Viridis_r",
+                            colorbar=dict(title="FDR p"),
+                            line=dict(width=1, color="black"),
+                        ),
+                        error_x=dict(
+                            type="data",
+                            symmetric=False,
+                            array=forest_df["CI high"] - forest_df["β1 predicting need support"],
+                            arrayminus=forest_df["β1 predicting need support"] - forest_df["CI low"],
+                        ),
+                        customdata=forest_df[["Selected N", "FDR p", "Sig."]],
+                        hovertemplate=(
+                            "%{y}<br>β1=%{x:.3f}<br>"
+                            "Selected N=%{customdata[0]}<br>FDR p=%{customdata[1]:.4f} %{customdata[2]}<extra></extra>"
+                        ),
+                    ))
+                    forest_fig.add_vline(x=0, line_dash="dash", line_color="gray")
+                    forest_fig.update_layout(
+                        title="Structure-to-need-support forest plot",
+                        xaxis_title="β1 predicting Need Satisfaction Mean",
+                        yaxis_title="Design structure",
+                        height=max(480, 34 * len(forest_df)),
+                    )
+                    st.plotly_chart(forest_fig, use_container_width=True)
                 st.dataframe(
                     structure_need_df.style.format({
                         "β1 predicting need support": "{:.3f}",
