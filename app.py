@@ -255,6 +255,53 @@ def fit_week_fe_continuous_model(df, predictor, outcome="Weekly_Engagement_Mean"
     }])
 
 
+def build_need_engagement_matrix(df, need_dimensions, engagement_dimensions):
+    rows = []
+    for need_label, need_col in need_dimensions:
+        for engagement_label, engagement_col in engagement_dimensions:
+            result_df = fit_week_fe_continuous_model(df, need_col, outcome=engagement_col)
+            if result_df.empty:
+                rows.append({
+                    "Psychological need dimension": need_label,
+                    "Engagement dimension": engagement_label,
+                    "Need variable": need_col,
+                    "Engagement variable": engagement_col,
+                    "N": math.nan,
+                    "Weeks": math.nan,
+                    "β1": math.nan,
+                    "SE": math.nan,
+                    "t": math.nan,
+                    "p (raw)": math.nan,
+                })
+                continue
+
+            result_row = result_df.iloc[0]
+            rows.append({
+                "Psychological need dimension": need_label,
+                "Engagement dimension": engagement_label,
+                "Need variable": need_col,
+                "Engagement variable": engagement_col,
+                "N": result_row["N"],
+                "Weeks": result_row["Weeks"],
+                "β1": result_row["β1 (Need support coefficient)"],
+                "SE": result_row["SE"],
+                "t": result_row["t"],
+                "p (raw)": result_row["p (raw)"],
+            })
+
+    matrix_df = pd.DataFrame(rows)
+    if matrix_df.empty:
+        return matrix_df
+    fdr_values = benjamini_hochberg(matrix_df["p (raw)"].tolist())
+    matrix_df["FDR p"] = fdr_values
+    matrix_df["Sig."] = matrix_df["FDR p"].apply(significance_stars)
+    matrix_df["Cell result"] = matrix_df.apply(
+        lambda row: "" if pd.isna(row["β1"]) else f"β={row['β1']:.3f}, pFDR={row['FDR p']:.4f} {row['Sig.']}",
+        axis=1,
+    )
+    return matrix_df
+
+
 def make_option_engagement_table(df, option_col, label):
     if option_col not in df.columns:
         return pd.DataFrame()
@@ -1005,6 +1052,66 @@ if saved_files:
                         "t": "{:.2f}",
                         "p (raw)": "{:.4f}",
                         "R-squared": "{:.3f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.markdown("**Dimension-level matrix: psychological needs × engagement dimensions**")
+            st.caption(
+                "Each cell uses the same model form: Engagement dimension_it = β0 + β1(Need dimension_it) + week fixed effects + error. "
+                "FDR p adjusts across the 12 dimension-level tests."
+            )
+            need_dimensions = [
+                ("Autonomy", "Autonomy"),
+                ("Competence", "Competence"),
+                ("Relatedness", "Relatedness"),
+            ]
+            engagement_dimensions = [
+                ("Behavioral", "Behavioral"),
+                ("Cognitive", "Cognitive"),
+                ("Emotional", "Emotional"),
+                ("Agentic", "Agentic"),
+            ]
+            dimension_matrix_df = build_need_engagement_matrix(quant_df, need_dimensions, engagement_dimensions)
+            if dimension_matrix_df.empty:
+                st.info("Not enough complete responses to estimate the dimension-level matrix.")
+            else:
+                beta_matrix = dimension_matrix_df.pivot(
+                    index="Psychological need dimension",
+                    columns="Engagement dimension",
+                    values="β1",
+                ).reindex(index=[item[0] for item in need_dimensions], columns=[item[0] for item in engagement_dimensions])
+                cell_matrix = dimension_matrix_df.pivot(
+                    index="Psychological need dimension",
+                    columns="Engagement dimension",
+                    values="Cell result",
+                ).reindex(index=[item[0] for item in need_dimensions], columns=[item[0] for item in engagement_dimensions])
+                heatmap = go.Figure(data=go.Heatmap(
+                    z=beta_matrix.values,
+                    x=beta_matrix.columns,
+                    y=beta_matrix.index,
+                    colorscale="RdBu",
+                    zmid=0,
+                    colorbar=dict(title="β1"),
+                    hovertemplate="Need: %{y}<br>Engagement: %{x}<br>β1: %{z:.3f}<extra></extra>",
+                ))
+                heatmap.update_layout(
+                    title="β1 Matrix: Need Dimensions Predicting Engagement Dimensions",
+                    xaxis_title="Engagement dimension",
+                    yaxis_title="Psychological need dimension",
+                )
+                st.plotly_chart(heatmap, use_container_width=True)
+                st.dataframe(cell_matrix, use_container_width=True)
+                st.dataframe(
+                    dimension_matrix_df.style.format({
+                        "N": "{:.0f}",
+                        "Weeks": "{:.0f}",
+                        "β1": "{:.3f}",
+                        "SE": "{:.3f}",
+                        "t": "{:.2f}",
+                        "p (raw)": "{:.4f}",
+                        "FDR p": "{:.4f}",
                     }),
                     use_container_width=True,
                     hide_index=True,
