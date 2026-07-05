@@ -225,6 +225,53 @@ def build_association_table(df, predictors, outcome="Overall_Engagement", predic
     return pd.DataFrame(rows).sort_values(["FDR p", "Predictor"], ascending=[True, True])
 
 
+def cronbach_alpha(df, item_cols):
+    available_cols = [col for col in item_cols if col in df.columns]
+    item_df = df[available_cols].dropna()
+    item_count = len(available_cols)
+    if item_count < 2 or len(item_df) < 3:
+        return math.nan, len(item_df), item_count, math.nan
+
+    item_variances = item_df.var(axis=0, ddof=1)
+    total_score = item_df.sum(axis=1)
+    total_variance = total_score.var(ddof=1)
+    if pd.isna(total_variance) or total_variance == 0:
+        alpha = math.nan
+    else:
+        alpha = item_count / (item_count - 1) * (1 - item_variances.sum() / total_variance)
+
+    mean_inter_item_r = math.nan
+    if item_count == 2:
+        mean_inter_item_r = item_df.iloc[:, 0].corr(item_df.iloc[:, 1])
+    elif item_count > 2:
+        corr_matrix = item_df.corr()
+        upper_values = corr_matrix.where(
+            pd.DataFrame(
+                [[col_idx > row_idx for col_idx in range(item_count)] for row_idx in range(item_count)],
+                index=corr_matrix.index,
+                columns=corr_matrix.columns,
+            )
+        ).stack()
+        mean_inter_item_r = upper_values.mean() if len(upper_values) else math.nan
+
+    return alpha, len(item_df), item_count, mean_inter_item_r
+
+
+def build_reliability_table(df, scale_specs):
+    rows = []
+    for scale_name, item_cols, note in scale_specs:
+        alpha, n_value, item_count, mean_inter_item_r = cronbach_alpha(df, item_cols)
+        rows.append({
+            "Scale": scale_name,
+            "Items": item_count,
+            "N complete": n_value,
+            "Cronbach's alpha": alpha,
+            "Mean inter-item r": mean_inter_item_r,
+            "Note": note,
+        })
+    return pd.DataFrame(rows)
+
+
 def fit_week_fe_continuous_model(df, predictor, outcome="Weekly_Engagement_Mean"):
     if predictor not in df.columns or outcome not in df.columns:
         return pd.DataFrame()
@@ -1167,11 +1214,12 @@ if saved_files:
     # Core SDT / engagement dimensions
     full_df['Clear_Expectations'] = full_df[[c for c in full_df.columns if 'needs_1' in c][0]]
     full_df['Autonomy'] = full_df[[c for c in full_df.columns if 'needs_2' in c][0]]
+    full_df['Autonomy_Choice'] = full_df['Autonomy']
     full_df['Skill_Growth'] = full_df[[c for c in full_df.columns if 'needs_3' in c][0]]
     full_df['Meaningful_Outcomes'] = full_df[[c for c in full_df.columns if 'needs_4' in c][0]]
     full_df['Belonging'] = full_df[[c for c in full_df.columns if 'needs_5' in c][0]]
     full_df['Contribution_Value'] = full_df[[c for c in full_df.columns if 'needs_6' in c][0]]
-    full_df['Autonomy'] = full_df[['Clear_Expectations', 'Autonomy']].mean(axis=1)
+    full_df['Autonomy'] = full_df[['Clear_Expectations', 'Autonomy_Choice']].mean(axis=1)
     full_df['Competence'] = full_df[['Skill_Growth', 'Meaningful_Outcomes']].mean(axis=1)
     full_df['Relatedness'] = full_df[['Belonging', 'Contribution_Value']].mean(axis=1)
     full_df['Need_Satisfaction_Mean'] = full_df[['Autonomy', 'Competence', 'Relatedness']].mean(axis=1)
@@ -1253,6 +1301,57 @@ if saved_files:
                 )
                 .reset_index()
                 .sort_values("Week_Number")
+            )
+
+            st.markdown("**Scale reliability: Cronbach's alpha**")
+            st.caption(
+                "Cronbach's alpha estimates internal consistency among items in a scale. "
+                "Common reporting conventions treat alpha >= .70 as acceptable, but 2-item subscales should be interpreted cautiously; their mean inter-item correlation is also shown."
+            )
+            reliability_df = build_reliability_table(
+                quant_df,
+                [
+                    (
+                        "Psychological need satisfaction total",
+                        [
+                            "Clear_Expectations",
+                            "Autonomy_Choice",
+                            "Skill_Growth",
+                            "Meaningful_Outcomes",
+                            "Belonging",
+                            "Contribution_Value",
+                        ],
+                        "Six need items before subscale averaging.",
+                    ),
+                    (
+                        "Autonomy",
+                        ["Clear_Expectations", "Autonomy_Choice"],
+                        "Two-item subscale; read alpha with mean inter-item r.",
+                    ),
+                    (
+                        "Competence",
+                        ["Skill_Growth", "Meaningful_Outcomes"],
+                        "Two-item subscale; read alpha with mean inter-item r.",
+                    ),
+                    (
+                        "Relatedness",
+                        ["Belonging", "Contribution_Value"],
+                        "Two-item subscale; read alpha with mean inter-item r.",
+                    ),
+                    (
+                        "Weekly engagement total",
+                        ["Behavioral", "Cognitive", "Emotional", "Agentic"],
+                        "Four engagement items before averaging.",
+                    ),
+                ],
+            )
+            st.dataframe(
+                reliability_df.style.format({
+                    "Cronbach's alpha": "{:.3f}",
+                    "Mean inter-item r": "{:.3f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
             )
 
             st.markdown("**Analysis 1. Descriptive trend**")
